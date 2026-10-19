@@ -1,0 +1,14 @@
+{
+  "name": "pi-kb",
+  "version": "0.2.0",
+  "description": "Insert saved encrypted KB snapshots into Pi conversations with Codex.",
+  "private": true,
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yukimaru77/pi-kb.git"
+  },
+  "keywords": ["pi-package"],
+  "pi": { "extensions": ["./index.mjs"] },
+  "scripts": { "test": "node --test test/*.test.mjs" }
+}
