@@ -1,7 +1,7 @@
 {
   "name": "pi-kb",
-  "version": "0.2.0",
-  "description": "Insert saved encrypted KB snapshots into Pi conversations with Codex.",
+  "version": "0.3.0",
+  "description": "Insert saved decrypted KBs into Pi conversations as plaintext, for any model.",
   "private": true,
   "type": "module",
   "repository": {

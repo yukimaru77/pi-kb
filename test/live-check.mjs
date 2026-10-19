@@ -1,12 +1,13 @@
 // Opt-in real Codex verification; no user settings are changed.
 import assert from "node:assert/strict";
 import {mkdir,writeFile} from "node:fs/promises";
-import {createHash} from "node:crypto";
 import {execFileSync} from "node:child_process";
 import {homedir} from "node:os";
 import {join,resolve} from "node:path";
 import {fileURLToPath,pathToFileURL} from "node:url";
-import {MESSAGE,BLOB_TYPES} from "../core.mjs";
+import {MESSAGE} from "../core.mjs";
+const BLOB_TYPES=new Set(["compaction","compaction_summary","context_compaction"]);
+const KB_MARKER="[PI KB: sdp";
 
 const sdkPath=process.env.PI_KB_SDK_PATH || join(
   execFileSync(process.platform==="win32" ? "npm.cmd" : "npm",["root","-g"],{encoding:"utf8"}).trim(),
@@ -21,14 +22,12 @@ const runtime=await ModelRuntime.create();
 const model=runtime.getModel("openai-codex","gpt-6.1-sol");
 const settings=SettingsManager.inMemory({transport:"sse",compaction:{enabled:false,reserveTokens:16384,keepRecentTokens:0},retry:{enabled:false}});
 const requests=[], answers=[];
-let phase="before", expected=[], blobs=[], session, detachProbe;
-const hash=i=>createHash("sha256").update(JSON.stringify(i)).digest("hex");
+let phase="before", session, detachProbe;
 function record(payload) {
   const input=payload.input||[];
-  const hashes=input.map(hash);
-  const kbIndex=expected.length ? hashes.findIndex((_,i)=>JSON.stringify(hashes.slice(i,i+expected.length))===JSON.stringify(expected)) : -1;
+  const kbIndex=input.findIndex(i=>i.role==="user"&&JSON.stringify(i).includes(KB_MARKER));
   const beforeIndex=input.findIndex(i=>JSON.stringify(i).includes("BEFORE_KB_BOUNDARY"));
-  requests.push({phase,kbIndex,beforeIndex,kbExact:kbIndex>=0,originalBlobs:input.filter(i=>blobs.includes(i.encrypted_content)).length,blobs:input.filter(i=>BLOB_TYPES.has(i.type)).length,markers:input.some(i=>JSON.stringify(i).includes("[PI_KB:"))});
+  requests.push({phase,kbIndex,beforeIndex,kbPlain:kbIndex>=0,kbCount:input.filter(i=>JSON.stringify(i).includes(KB_MARKER)).length,blobs:input.filter(i=>BLOB_TYPES.has(i.type)).length,markers:input.some(i=>JSON.stringify(i).includes("[PI_KB:"))});
 }
 async function open(manager) {
   const loader=new DefaultResourceLoader({cwd:root,agentDir,settingsManager:settings,
@@ -77,9 +76,10 @@ try {
   assert.ok(insertion,"slash command inserted a custom_message into the session");
   assert.equal(insertion.type,"custom_message");
   const kb=insertion.details.snapshot;
-  expected=kb.items.map(hash);
-  blobs=kb.items.filter(i=>BLOB_TYPES.has(i.type)).map(i=>i.encrypted_content);
-  assert.ok(kb.items.some(i=>i.role==="developer"));
+  assert.ok(insertion.content.startsWith(KB_MARKER),"plaintext with preamble");
+  assert.ok(insertion.content.includes("## Decrypted KB material:"));
+  assert.ok(!JSON.stringify(insertion.details).includes("## Decrypted KB material:"),"details carry provenance only");
+  assert.equal(kb.name,"sdp");
   phase="initial";
   await prompt("今挿入されたSDPの論文名と手法を200字程度で説明してください。");
   const path=manager.getSessionFile();
@@ -91,7 +91,7 @@ try {
   await session.compact("Preserve the passphrase and the supplied SDP knowledge.");
   const compact=session.sessionManager.getBranch().filter(e=>e.type==="compaction").at(-1);
   assert.equal(compact?.details?.kind,"pi-codex-remote-compaction");
-  assert.ok(!compact.details.replacementHistory.some(i=>blobs.includes(i.encrypted_content)));
+  assert.ok(!JSON.stringify(compact.details.replacementHistory).includes(KB_MARKER));
   assert.ok(!JSON.stringify(compact.details.replacementHistory).includes("[PI_KB:"));
   phase="after-compact";
   await prompt("合言葉と、SDPが人間の修正データをどう使うかを100字程度で答えてください。");
@@ -101,17 +101,17 @@ try {
   await prompt("SDPの正式な論文名を答えてください。");
   for(const p of ["initial","resumed-before-compact","compact"]) {
     const request=requests.find(r=>r.phase===p);
-    assert.ok(request?.kbExact,p+": exact Blob sequence and developer item");
+    assert.equal(request?.kbCount,1,p+": exactly one plaintext KB message");
     assert.ok(request.beforeIndex>=0&&request.beforeIndex<request.kbIndex,p+": inserted after existing conversation");
     assert.equal(request.markers,false);
   }
   for(const p of ["after-compact","resumed-after-compact"]) {
     const request=requests.find(r=>r.phase===p);
-    assert.equal(request?.originalBlobs,0,p+": no resurrection");
+    assert.equal(request?.kbCount,0,p+": no resurrection");
     assert.equal(request?.markers,false);
     assert.ok(request?.blobs>0,p+": new compacted history present");
   }
   assert.ok(answers.find(a=>a.phase==="after-compact").answer.includes("青い灯台"));
-  await writeFile(root+"/result-v2.json",JSON.stringify({pass:true,requests,answers,sessionFile:path},null,2),{mode:0o600});
+  await writeFile(root+"/result-v3.json",JSON.stringify({pass:true,requests,answers,sessionFile:path},null,2),{mode:0o600});
   console.log(JSON.stringify({pass:true,requests}));
 } finally {close();}
