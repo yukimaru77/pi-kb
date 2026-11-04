@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { ENTRY, LEGACY_MESSAGE, MESSAGE, createInsertion, describeFailure, insertionsFromBranch, kbNames, parseCommand, selectionFromBranch, statusText, validateSnapshot } from "../core.mjs";
 import kbExtension, { AUTOLOAD_ENV } from "../index.mjs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -72,8 +73,10 @@ function host() {
     sendMessage: (message, options) => { sent.push({ message, options }); branch.push({ type: "custom_message", ...message }); },
     appendEntry: (customType, data) => branch.push({ type: "custom", customType, data }),
   };
+  // No kb.json anywhere: these tests exercise the kb-command path.
+  process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), "pi-kb-agent-"));
   const ctx = {
-    cwd: process.cwd(), isIdle: () => true,
+    cwd: process.env.PI_CODING_AGENT_DIR, isIdle: () => true,
     ui: { notify: (text, level) => notices.push({ text, level }), setStatus: (key, text) => { status[key] = text; } },
     sessionManager: { getBranch: () => branch, getSessionId: () => "s", getLeafId: () => String(branch.length) },
   };

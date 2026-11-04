@@ -4,9 +4,24 @@
 `kb export 名前 --decrypted`の出力(`kb claude`がClaudeへ渡すものと同じ本文)を使い、
 `--remote`のような毎回のprefix追加はしない。暗号化Blob(compaction blob)は使わない。
 
-必要: Pi 1.1、`kb export --decrypted`対応のkbコマンド([kb-repomap](https://github.com/yukimaru77/kb-repomap))。
-モデルの種類は問わない。kbコマンドと保存済みKBは別途用意する。このリポジトリには含まれない。
-kbの実行ファイルは`PI_KB_COMMAND`で指定可能。
+必要: Pi 1.1 と git。保存済みKB(復号済みの本文を含む保存先Gitリポジトリ)は別途用意する。
+**kbコマンドは不要**: 設定ファイル `kb.json` があれば、保存先をgitで直接読む(`kb export --decrypted` と同じ本文)。
+
+```json
+{ "stores": [{ "name": "pepabo", "url": "https://github.com/gmo-pepabo/pepabo-kb-store.git" }] }
+```
+
+置き場所は次の順に探し、最初に見つかった1つだけを使う。
+
+1. 起動したディレクトリの `.pi/kb.json`(プロジェクト用。例: `octane/.pi/kb.json`)
+2. Piの設定ディレクトリの `kb.json`(既定 `~/.pi/agent/kb.json`。`PI_CODING_AGENT_DIR` に従う)
+
+`stores` の各要素は `name`・`url`(必須)と `branch`(省略時はリモートの既定ブランチ)。
+保存先は `~/.cache/pi-kb/` にbareで取得し、毎回fetchする(失敗時は前回取得分を使う)。`cacheDir` で変更できる。
+認証はgitの設定(credential helperやSSH鍵)に従う。
+どちらの `kb.json` も無い場合は、従来どおり kbコマンド([kb-repomap](https://github.com/yukimaru77/kb-repomap)) を使う
+(`PI_KB_COMMAND` で実行ファイルを指定可能)。
+モデルの種類は問わない。
 
 **平文のKBは、選択中のモデルのprovider(Codex・OpenAI・Anthropicなど)へ通常の会話内容として送られる。**
 送ってよいKBかどうかは利用者が判断すること。
@@ -26,8 +41,9 @@ pi install /path/to/pi-kb
 /kb status
 ```
 
-ターミナルから `kb 名前 pi [piの引数...]` で起動すると、Pi起動直後に `/kb 名前` を実行したのと同じ挿入を
-最初のセッションへ一度だけ行う（kbが環境変数 `PI_KB_AUTOLOAD` に `/kb` と同じ引数を入れて起動する）。
+起動時に読み込むには `pi --kb 名前`(`pi --kb "名前 --store 保存先 --file ファイル名"` も可)。
+kbコマンドがある環境では `kb 名前 pi [piの引数...]` でも同じ。どちらも、Pi起動直後に `/kb 名前` を実行したのと同じ挿入を
+最初のセッションへ一度だけ行う（`kb 名前 pi` は環境変数 `PI_KB_AUTOLOAD` に `/kb` と同じ引数を入れて起動する）。
 同じKBを挿入済みの再開セッションには再挿入しない。KBを挿入したセッションは、下部ステータスに
 `📚 KB: 名前` と表示される。
 

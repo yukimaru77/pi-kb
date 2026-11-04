@@ -1,16 +1,62 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { ENTRY, MESSAGE, createInsertion, describeFailure, kbNames, selectionFromBranch, insertionsFromBranch, parseCommand, statusText, validateSnapshot } from "./core.mjs";
+import { CONFIG_NAME, agentDir, exportDecrypted, findConfig, listKbs } from "./store.mjs";
 
 const execute = promisify(execFile);
-const usage = "/kb 名前 · /kb list · /kb status";
+const usage = "/kb 名前 · /kb list · /kb status · 起動時: pi --kb 名前";
 
 /** `kb NAME pi` sets this to the /kb arguments; the first session of the process loads that KB once. */
 export const AUTOLOAD_ENV = "PI_KB_AUTOLOAD";
+/** `pi --kb NAME` (or "NAME --store S --file F") does the same without the kb command. */
+export const AUTOLOAD_FLAG = "kb";
+
+/** Option values of a parsed /kb load command. */
+function loadOptions(argv) {
+  const options = {};
+  for (let i = 3; i < argv.length; i += 2) options[argv[i].slice(2)] = argv[i + 1];
+  return options;
+}
+
+function noSourceMessage(cwd) {
+  return `KBの保存先が設定されていません。${cwd}/.pi/${CONFIG_NAME} か ${agentDir()}/${CONFIG_NAME} に {"stores":[{"name":"...","url":"https://.../kb-store.git"}]} を書くか、kbコマンドを入れてください。`;
+}
 
 export default function kbExtension(pi) {
   let loading = false;
-  let autoloadPending = Boolean(process.env[AUTOLOAD_ENV]?.trim());
+  let autoloadChecked = false;
+  pi.registerFlag?.(AUTOLOAD_FLAG, {
+    description: `Insert a saved KB into the first session, like /kb (value: "NAME [--store S] [--file F]"); stores come from .pi/${CONFIG_NAME}`,
+    type: "string",
+  });
+
+  /** kb.json (project, then agent dir) is read natively with git; without it the kb command is used. */
+  const exportSnapshot = async (command, ctx) => {
+    const config = findConfig(ctx.cwd);
+    if (config) return exportDecrypted(config, command.argv[1], loadOptions(command.argv));
+    let stdout;
+    try {
+      ({ stdout } = await execute(process.env.PI_KB_COMMAND || "kb", command.argv, {
+        cwd: ctx.cwd, maxBuffer: 128 * 1024 * 1024, timeout: 120_000,
+      }));
+    } catch (error) {
+      if (error?.code === "ENOENT" && !process.env.PI_KB_COMMAND) throw new Error(noSourceMessage(ctx.cwd));
+      throw new Error(describeFailure(error));
+    }
+    try { return JSON.parse(stdout); } catch { throw new Error("kb export --decrypted の出力がJSONではありません。"); }
+  };
+
+  const listing = async (ctx) => {
+    const config = findConfig(ctx.cwd);
+    if (config) return listKbs(config);
+    try {
+      const { stdout } = await execute(process.env.PI_KB_COMMAND || "kb", ["list"], { cwd: ctx.cwd, maxBuffer: 16 * 1024 * 1024, timeout: 120_000 });
+      return stdout;
+    } catch (error) {
+      if (error?.code === "ENOENT" && !process.env.PI_KB_COMMAND) throw new Error(noSourceMessage(ctx.cwd));
+      throw new Error(describeFailure(error));
+    }
+  };
   const updateStatus = (ctx) => {
     ctx.ui.setStatus("pi-kb", statusText(insertionsFromBranch(ctx.sessionManager.getBranch())));
   };
@@ -19,20 +65,11 @@ export default function kbExtension(pi) {
   const load = async (command, ctx) => {
     const sessionId = ctx.sessionManager.getSessionId();
     const leafId = ctx.sessionManager.getLeafId();
-    let stdout;
-    try {
-      ({ stdout } = await execute(process.env.PI_KB_COMMAND || "kb", command.argv, {
-        cwd: ctx.cwd, maxBuffer: 128 * 1024 * 1024, timeout: 120_000,
-      }));
-    } catch (error) {
-      throw new Error(describeFailure(error));
-    }
+    const exported = await exportSnapshot(command, ctx);
     if (ctx.sessionManager.getSessionId() !== sessionId || ctx.sessionManager.getLeafId() !== leafId || !ctx.isIdle()) {
       throw new Error("読み込み中に会話が進んだため、適用していません。もう一度 /kb を実行してください。");
     }
-    let parsed;
-    try { parsed = JSON.parse(stdout); } catch { throw new Error("kb export --decrypted の出力がJSONではありません。"); }
-    const snapshot = validateSnapshot(parsed);
+    const snapshot = validateSnapshot(exported);
     pi.sendMessage(createInsertion(snapshot), { triggerTurn: false });
     updateStatus(ctx);
     return snapshot;
@@ -46,12 +83,15 @@ export default function kbExtension(pi) {
       ctx.ui.notify(`旧設定のKB「${legacy.name}」は暗号化方式のため挿入しませんでした。必要なら /kb ${legacy.name} で読み込み直してください。`, "warning");
     }
     updateStatus(ctx);
-    if (!autoloadPending) return;
-    autoloadPending = false;
+    if (autoloadChecked) return;
+    autoloadChecked = true;
+    const flag = pi.getFlag?.(AUTOLOAD_FLAG);
+    const requested = (typeof flag === "string" && flag.trim()) || process.env[AUTOLOAD_ENV]?.trim();
+    if (!requested) return;
     loading = true;
     try {
-      const command = parseCommand(process.env[AUTOLOAD_ENV]);
-      if (command.action !== "load") throw new Error(`${AUTOLOAD_ENV} にはKB名を指定してください。`);
+      const command = parseCommand(requested);
+      if (command.action !== "load") throw new Error("--kb にはKB名を指定してください。");
       const name = command.argv[1];
       if (kbNames(insertionsFromBranch(ctx.sessionManager.getBranch())).includes(name)) {
         ctx.ui.notify(`KB「${name}」はこのセッションに挿入済みです。`, "info");
@@ -90,15 +130,8 @@ export default function kbExtension(pi) {
         loading = true;
         acquired = true;
         if (command.action === "list") {
-          let stdout;
-          try {
-            ({ stdout } = await execute(process.env.PI_KB_COMMAND || "kb", ["list"], {
-              cwd: ctx.cwd, maxBuffer: 16 * 1024 * 1024, timeout: 120_000,
-            }));
-          } catch (error) {
-            throw new Error(describeFailure(error));
-          }
-          ctx.ui.notify(stdout.trim() || "登録済みKBはありません。", "info");
+          const text = await listing(ctx);
+          ctx.ui.notify(text.trim() || "登録済みKBはありません。", "info");
           return;
         }
         const snapshot = await load(command, ctx);
