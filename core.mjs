@@ -31,6 +31,24 @@ export function insertionsFromBranch(branch) {
   return branch.filter((e) => e.type === "custom_message" && (e.customType === MESSAGE || e.customType === LEGACY_MESSAGE));
 }
 
+/** KB names inserted on this branch, in first-insertion order, without duplicates. */
+export function kbNames(entries) {
+  const names = [];
+  for (const entry of entries) {
+    const name = entry.details?.snapshot?.name;
+    if (typeof name === "string" && !names.includes(name)) names.push(name);
+  }
+  return names;
+}
+
+/** Footer status that tells the session runs with a KB; undefined clears it. */
+export function statusText(entries) {
+  if (!entries.length) return undefined;
+  const names = kbNames(entries);
+  const label = names.length ? names.join(", ") : "(不明)";
+  return `📚 KB: ${label}` + (entries.length > names.length ? ` ×${entries.length}` : "");
+}
+
 function describe(info) {
   const parts = [
     typeof info.store === "string" ? `store ${info.store}` : undefined,

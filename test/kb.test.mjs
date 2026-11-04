@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { ENTRY, LEGACY_MESSAGE, MESSAGE, createInsertion, describeFailure, insertionsFromBranch, parseCommand, selectionFromBranch, validateSnapshot } from "../core.mjs";
-import kbExtension from "../index.mjs";
+import { ENTRY, LEGACY_MESSAGE, MESSAGE, createInsertion, describeFailure, insertionsFromBranch, kbNames, parseCommand, selectionFromBranch, statusText, validateSnapshot } from "../core.mjs";
+import kbExtension, { AUTOLOAD_ENV } from "../index.mjs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -64,7 +64,7 @@ test("maps known kb failures to fixed guidance", () => {
 
 function host() {
   const branch = [];
-  const handlers = {}, notices = [], sent = [];
+  const handlers = {}, notices = [], sent = [], status = {};
   let command;
   const pi = {
     on: (name, fn) => { handlers[name] = fn; },
@@ -74,11 +74,11 @@ function host() {
   };
   const ctx = {
     cwd: process.cwd(), isIdle: () => true,
-    ui: { notify: (text, level) => notices.push({ text, level }), setStatus: () => {} },
+    ui: { notify: (text, level) => notices.push({ text, level }), setStatus: (key, text) => { status[key] = text; } },
     sessionManager: { getBranch: () => branch, getSessionId: () => "s", getLeafId: () => String(branch.length) },
   };
   kbExtension(pi);
-  return { branch, handlers, notices, sent, ctx, run: (args) => command.handler(args, ctx) };
+  return { branch, handlers, notices, sent, status, ctx, run: (args) => command.handler(args, ctx) };
 }
 
 test("/kb inserts plaintext without a turn for any model, and /kb status reports it", async (t) => {
@@ -116,4 +116,60 @@ test("legacy always-prefix selection is cleared without inserting encrypted cont
   assert.equal(h.sent.length, 0);
   assert.equal(h.branch.at(-1).data.snapshot, null);
   assert.match(h.notices.at(-1).text, /\/kb legacy/);
+});
+
+test("footer status names the KBs inserted on the branch", () => {
+  assert.equal(statusText([]), undefined);
+  const one = { type: "custom_message", ...createInsertion(snapshot()) };
+  assert.equal(statusText([one]), "📚 KB: example");
+  const other = { type: "custom_message", ...createInsertion({ ...snapshot(), name: "octane" }) };
+  assert.deepEqual(kbNames([one, other, one]), ["example", "octane"]);
+  assert.equal(statusText([one, other, one]), "📚 KB: example, octane ×3");
+});
+
+async function fixtureCli(t) {
+  const dir = await mkdtemp(join(tmpdir(), "pi-kb-auto-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const calls = join(dir, "calls");
+  const cli = join(dir, "kb");
+  const exported = JSON.stringify(snapshot());
+  await writeFile(cli, `#!${process.execPath}\nrequire('fs').appendFileSync(${JSON.stringify(calls)}, process.argv.slice(2).join(' ')+'\\n');\nif (process.argv[2]==='export') console.log(${JSON.stringify(exported)}); else process.exit(9);\n`, { mode: 0o700 });
+  return { cli, calls };
+}
+
+function withEnv(t, values) {
+  for (const [key, value] of Object.entries(values)) {
+    const previous = process.env[key];
+    t.after(() => { if (previous === undefined) delete process.env[key]; else process.env[key] = previous; });
+    process.env[key] = value;
+  }
+}
+
+test("kb NAME pi: the first session loads the KB once, like /kb NAME, and the footer shows it", async (t) => {
+  const { cli, calls } = await fixtureCli(t);
+  withEnv(t, { PI_KB_COMMAND: cli, [AUTOLOAD_ENV]: "example --store research --file v1" });
+  const h = host();
+  await h.handlers.session_start({ reason: "startup" }, h.ctx);
+  assert.equal(h.sent.length, 1, h.notices.map((n) => n.text).join("\n"));
+  assert.deepEqual(h.sent[0].options, { triggerTurn: false });
+  assert.equal(h.status["pi-kb"], "📚 KB: example");
+  const { readFile } = await import("node:fs/promises");
+  assert.equal((await readFile(calls, "utf8")).trim(), "export example --decrypted --store research --file v1");
+  await h.handlers.session_start({ reason: "new" }, h.ctx);
+  assert.equal(h.sent.length, 1, "only the first session of the process autoloads");
+});
+
+test("autoload skips a session that already holds the KB and reports bad arguments", async (t) => {
+  const { cli } = await fixtureCli(t);
+  withEnv(t, { PI_KB_COMMAND: cli, [AUTOLOAD_ENV]: "example" });
+  const resumed = host();
+  resumed.branch.push({ type: "custom_message", ...createInsertion(snapshot()) });
+  await resumed.handlers.session_start({ reason: "startup" }, resumed.ctx);
+  assert.equal(resumed.sent.length, 0);
+  assert.equal(resumed.status["pi-kb"], "📚 KB: example");
+  process.env[AUTOLOAD_ENV] = "x;uname";
+  const bad = host();
+  await bad.handlers.session_start({ reason: "startup" }, bad.ctx);
+  assert.equal(bad.sent.length, 0);
+  assert.equal(bad.notices.at(-1).level, "error");
 });
